@@ -18,6 +18,7 @@
 */
 
 #include "sa-matching.h"
+#include <time.h>
 KSEQ_INIT(gzFile, gzread)
 
 static inline int min(int a, int b) {
@@ -25,7 +26,7 @@ static inline int min(int a, int b) {
 }
 
 /* compares a pattern (a string) and a suffix of the text, by extracting the prefix of
-   the text with same length as the patter. The return value is:
+   the text with same length as the pattern. The return value is:
    = 0 if the pattern is equal the prefix
    < 0 if the pattern precedes the prefix (in lexicographical order)
    > 0 if the pattern follows  the prefix (in lexicographical order)
@@ -128,7 +129,7 @@ sa_search_1(const char* text, const int* sa, const unsigned int n,
 
 /* Accelerant #2 */
 static unsigned int
-sa_search_2(const char* text, const int* sa, const unsigned int n,
+sa_search_2(const char* text, const unsigned int* sa, const unsigned int n,
             const unsigned int* lcp, const char* pattern, const unsigned int m) {
         unsigned int found = -1;
         if (suffix_cmp(text, sa[0], n, pattern, m) < 0 ||
@@ -220,6 +221,141 @@ sa_search_2(const char* text, const int* sa, const unsigned int n,
         return found;
 }
 
+static unsigned int*
+lcp_kasai(const char* text, const unsigned int* sa, const unsigned int n) {
+        //lcp-array allocation
+        unsigned int* lcp = (unsigned int*) malloc(n * sizeof(unsigned int));
+        if(lcp == NULL)
+                return lcp;
+
+        //inverted-suffix-array allocation
+        unsigned int* i_sa = (unsigned int*) malloc(n * sizeof(unsigned int));
+        if(i_sa == NULL) {
+                free(lcp);
+                return NULL;
+        }
+        
+        //inverted suffix array: sa[i] = j, i_sa[j] = i
+        for(unsigned int i = 0; i < n; i++)
+                i_sa[sa[i]] = i;
+        
+        unsigned int l = 0;
+        unsigned int k, j;
+        for(unsigned int i = 0; i < n - 1; i++) {
+                k = i_sa[i];    //sa[k] == i
+                j = sa[k - 1]; //i_sa[j] == k-1
+                while(text[i+l] == text[j + l])
+                        l++;
+                lcp[k] = l;
+                if(l > 0)
+                        l = l - 1;
+        }
+        //lcp[0] is always equals to 0
+        lcp[0] = 0;
+        
+        //inverted-suffix-array memory cleaning
+        free(i_sa);
+        return lcp;
+}
+
+static unsigned int
+sa_search_3(const char* text, const int* sa, const unsigned int n, const unsigned int* lcp, 
+            const char* pattern, const unsigned int m) {
+        unsigned int found = -1;
+        if (suffix_cmp(text, sa[0], n, pattern, m) < 0 ||
+            suffix_cmp(text, sa[n - 1], n, pattern, m) > 0)
+                return -1;
+        /* The pattern is not outside the realm of available suffixes.
+           Let's search for an occurrence
+        */
+        unsigned int lp = 0;
+        unsigned int rp = n - 1;
+        unsigned int l = lcp2(text + sa[lp], pattern, m);
+        unsigned int r = lcp2(text + sa[rp], pattern, m);
+        unsigned int
+                lcp_t(const unsigned int p1, const unsigned int p2) {
+                unsigned int min = lcp[p1];
+                if(p2 == p1 + 1)
+                        return lcp[p2];
+                for(int k = p1; k < p2; k++) 
+                        if(lcp[k] < min)
+                                min = lcp[k];
+                return min;
+        }
+        while (lp < rp - 1) {
+                unsigned int mp = lp + (rp - lp) / 2;
+                if (l > r)
+                        if (lcp_t(lp, mp) > l) {
+                                lp = mp;
+                        } else if (lcp_t(lp, mp) < l) {
+                                rp = mp;
+                                r += lcp2(text + sa[rp] + r, pattern + r, min(m - r, n - r));
+                        } else {
+                                /* lcp_t(lp, mp) == l */
+                                int cmp = suffix_cmp(text, sa[mp] + l, n - l, pattern + l, m - l);
+                                if (cmp == 0) {
+                                        found = mp;
+                                        break;
+                                }
+                                if (cmp < 0) {
+                                        rp = mp;
+                                        r += lcp2(text + sa[rp] + l, pattern + l, min(m - l, n - l));
+                                } else {
+                                        lp = mp;
+                                        l += lcp2(text + sa[lp] + l, pattern + l, min(m - l, n - l));
+                                }
+                        }
+                else if (l < r)
+                        if (lcp_t(rp, mp) > r) {
+                                rp = mp;
+                        } else if (lcp_t(rp, mp) < r) {
+                                lp = mp;
+                                l += lcp2(text + sa[lp] + r, pattern + l, min(m - l, n - l));
+                        } else {
+                                /* lcp_t(rp, lp) == r */
+                                int cmp = suffix_cmp(text, sa[mp] + r, n - r, pattern + r, m - r);
+                                if (cmp == 0) {
+                                        found = mp;
+                                        break;
+                                }
+                                if (cmp < 0) {
+                                        lp = mp;
+                                        l += lcp2(text + sa[lp] + r, pattern + r, min(m - r, n - r));
+                                } else {
+                                        lp = mp;
+                                        r += lcp2(text + sa[rp] + r, pattern + r, min(m - r, n - r));
+                                }
+                        }
+                else {
+                        /* l == r */
+                        if (lcp_t(lp, rp) > l) {
+                                lp = mp;
+                        } else if (lcp_t(rp, lp) > r) {
+                                rp = mp;
+                        } else {
+                                /* lcp_t(mp, rp) == lcp_t(lp, mp) == l */
+                                int cmp = suffix_cmp(text, sa[mp] + l, n - l, pattern + l, m - l);
+                                if (cmp == 0) {
+                                        found = mp;
+                                        break;
+                                }
+                                if (cmp < 0) {
+                                        rp = mp;
+                                        r += lcp2(text + sa[rp] + l, pattern + l, min(m - l, n - l));
+                                } else {
+                                        lp = mp;
+                                        l += lcp2(text + sa[lp] + l, pattern + l, min(m - l, n - l));
+                                }
+                        }
+                }
+        }   
+        if (found == -1) {
+                if (suffix_cmp(text, sa[lp], n, pattern, m) == 0) found = lp;
+                if (suffix_cmp(text, sa[rp], n, pattern, m) == 0) found = rp;
+        }
+        return found;
+}
+
 int main(int argc, char **argv) {
         static struct gengetopt_args_info args_info;
         assert(cmdline_parser(argc, argv, &args_info) == 0);
@@ -236,27 +372,28 @@ int main(int argc, char **argv) {
                 search_f = sa_search_1;
         else if (args_info.accelerant_arg == 2)
                 search_f = sa_search_2;
+        else if (args_info.accelerant_arg == 3)
+                search_f = sa_search_3;
         else
                 search_f = sa_search;
 
 
 
         int* sa = malloc(n * sizeof(*sa));
-        unsigned int* lcp = malloc(n * sizeof(*sa));
+        //unsigned int* lcp = malloc(n * sizeof(*sa));
 
         if(sais((unsigned char*) text, sa, (int)n) != 0) {
                 fprintf(stderr, "%s: Cannot allocate memory.\n", argv[0]);
                 exit(EXIT_FAILURE);
         }
-        /* printf("Suffix array: ok\n"); */
-        sais_lcp((unsigned char*) text, sa, lcp, n);
-        lcp[0] = 0;
-        /* printf("LCP array: ok\n"); */
 
+        unsigned int* lcp = lcp_kasai(text, sa, n);
         unsigned int found = search_f(text, sa, n, lcp, pattern, m);
+
         /* If found != -1 we have found at least one occurrence.
            Let's find all of them!
         */
+
         if (found != -1) {
                 unsigned int lp = found;
                 for (;lcp[lp] >= m; lp--) {}
